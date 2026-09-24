@@ -309,14 +309,36 @@ async function finalizeMissing(dir: string, status: Status, policy: Policy, reas
   return json<Status>(join(dir, 'status.json'))
 }
 
-export async function inspect(taskId: string): Promise<{ request: TaskRequest; status: Status; session: Session; events: unknown[] }> {
+export async function inspect(taskId: string): Promise<{ request: TaskRequest; status: Status; session: Session; current_attempt: Attempt | null; events: unknown[] }> {
   const policy = await loadPolicy()
   const dir = taskDir(policy.state_root, taskId)
   await reconcile(dir, policy)
   await recoverQueuedSteering(dir, policy)
   const status = await reconcile(dir, policy)
   const events = (await readFile(join(dir, 'events.jsonl'), 'utf8')).trim().split('\n').filter(Boolean).map(x => JSON.parse(x) as unknown)
-  return { request: validateRequest(YAML.parse(await readFile(join(dir, 'request.yaml'), 'utf8'))), status, session: await json<Session>(join(dir, 'session.json')), events }
+  const session = await json<Session>(join(dir, 'session.json'))
+  return { request: validateRequest(YAML.parse(await readFile(join(dir, 'request.yaml'), 'utf8'))), status, session, current_attempt: session.attempts.find(x => x.attempt_id === status.attempt_id) ?? null, events }
+}
+
+export type OutputSource = 'harness' | 'stderr' | 'result' | 'supervisor' | 'error' | 'routes'
+
+export async function output(taskId: string, attemptId?: string, source: OutputSource = 'harness', lines = 100): Promise<{ task_id: string; attempt_id: string; harness: Harness; model: string; source: OutputSource; available: boolean; content: string }> {
+  if (!Number.isInteger(lines) || lines < 1 || lines > 1000) throw new Error('lines must be an integer from 1 to 1000')
+  const policy = await loadPolicy()
+  const dir = taskDir(policy.state_root, taskId)
+  const session = await json<Session>(join(dir, 'session.json'))
+  const attempt = session.attempts.find(x => x.attempt_id === (attemptId ?? session.current_attempt_id))
+  if (!attempt) throw new Error('attempt not found')
+  const files: Record<OutputSource, string> = {
+    harness: attempt.harness === 'codex' ? 'codex.jsonl' : attempt.harness === 'deepseek' ? 'deepseek.jsonl' : 'result.md',
+    stderr: attempt.harness === 'codex' ? 'codex.stderr.log' : 'supervisor.log',
+    result: 'result.md', supervisor: 'supervisor.log', error: 'error.log', routes: 'routes.jsonl'
+  }
+  const path = join(attemptDir(dir, attempt.attempt_id), files[source])
+  const available = await exists(path)
+  const raw = available ? await readFile(path, 'utf8') : ''
+  const content = source === 'result' ? raw : raw.split('\n').slice(-lines - (raw.endsWith('\n') ? 1 : 0)).join('\n')
+  return { task_id: taskId, attempt_id: attempt.attempt_id, harness: attempt.harness, model: attempt.requested_model, source, available, content }
 }
 
 export async function recoverQueuedSteering(dir: string, policy: Policy): Promise<void> {
@@ -343,13 +365,13 @@ export async function recoverQueuedSteering(dir: string, policy: Policy): Promis
   })
 }
 
-export async function list(projectId?: string): Promise<Array<{ task_id: string; state: string; role: string; harness: string }>> {
+export async function list(projectId?: string): Promise<Array<{ task_id: string; state: string; role: string; harness: string; model: string; resolved_model_group?: string }>> {
   const policy = await loadPolicy()
   const ids = projectId ? (await json<{ tasks: string[] }>(join(projectDir(policy.state_root, projectId), 'task-index.json'))).tasks : await directories(join(policy.state_root, 'tasks'))
   const result = []
   for (const id of ids) {
     const item = await inspect(id).catch(() => null)
-    if (item) result.push({ task_id: id, state: item.status.state, role: item.request.role, harness: item.session.attempts.at(-1)?.harness ?? item.request.harness })
+    if (item) result.push({ task_id: id, state: item.status.state, role: item.request.role, harness: item.current_attempt?.harness ?? item.request.harness, model: item.current_attempt?.requested_model ?? item.request.model, resolved_model_group: item.current_attempt?.resolved_model_group })
   }
   return result
 }
@@ -358,8 +380,22 @@ export async function wait(taskId: string, timeoutMs = 0): Promise<Status> {
   const end = timeoutMs ? Date.now() + timeoutMs : Infinity
   let lastRenewal = 0
   for (;;) {
-    const status = (await inspect(taskId)).status
-    if (status.terminal || status.needs_input || Date.now() >= end) return status
+    const inspected = await inspect(taskId)
+    const status = inspected.status
+    let correctionPending = false
+    if (status.state === 'completed') {
+      const policy = await loadPolicy()
+      const dir = taskDir(policy.state_root, taskId)
+      const sequence = Number(await readFile(join(dir, 'steering', 'sequence'), 'utf8').catch(() => '0'))
+      if (sequence) {
+        const delivered = await Promise.all(inspected.session.attempts.map(async attempt => {
+          const effective = YAML.parse(await readFile(join(attemptDir(dir, attempt.attempt_id), 'request.yaml'), 'utf8')) as AttemptRequest
+          return effective.steering_id ?? 0
+        }))
+        correctionPending = Math.max(0, ...delivered) < sequence
+      }
+    }
+    if ((status.terminal && !correctionPending) || status.needs_input || Date.now() >= end) return status
     if (process.env.AGENT_HARNESS_LEAD_ID && Date.now() - lastRenewal > 30000) {
       const policy = await loadPolicy()
       const request = await readRequest(taskDir(policy.state_root, taskId))

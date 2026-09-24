@@ -10,7 +10,7 @@ import { appendEvent, atomicJson, directories, json } from '../src/store.js'
 import { checkPolicy } from '../src/policy.js'
 import { acquireLease, releaseLease } from '../src/leases.js'
 import { sleep } from '../src/store.js'
-import { delegate, handoff, initialize, inspect, steer, wait } from '../src/controller.js'
+import { delegate, handoff, initialize, inspect, list, output, steer, wait } from '../src/controller.js'
 import { validateRequest, type Policy, type TaskRequest } from '../src/types.js'
 
 const exec = promisify(execFile)
@@ -118,6 +118,17 @@ test('fake adapter completes, steers, and hands off within one task', async () =
     assert.equal(bundle.session.attempts.length, 3)
     assert.equal(bundle.session.attempts[0].requested_model, 'alpha')
     assert.equal(bundle.session.attempts[2].requested_model, 'beta')
+    assert.equal(bundle.current_attempt?.harness, 'fake')
+    assert.equal(bundle.current_attempt?.requested_model, 'beta')
+    const listed = await list(bundle.request.project_id)
+    assert.equal(listed.find(x => x.task_id === delegated.task_id)?.model, 'beta')
+    const firstOutput = await output(delegated.task_id, 'attempt-01', 'result')
+    assert.equal(firstOutput.model, 'alpha')
+    assert.match(firstOutput.content, /Fake result/)
+    await writeFile(join(f.stateRoot, 'tasks', delegated.task_id, 'attempts', 'attempt-03', 'supervisor.log'), 'line one\nline two\n')
+    const log = await output(delegated.task_id, undefined, 'supervisor', 1)
+    assert.equal(log.content, 'line two\n')
+    await assert.rejects(output(delegated.task_id, '../outside'), /attempt not found/)
   } finally { await rm(f.base, { recursive: true, force: true }) }
 })
 

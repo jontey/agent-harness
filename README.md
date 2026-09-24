@@ -51,7 +51,7 @@ The state root is configurable, but its layout and file formats remain harness i
 The controller should provide these operations to a lead through a CLI, MCP server, or thin harness skill:
 
 ```text
-delegate  inspect  list  wait  steer  cancel  resume  handoff
+delegate  inspect  list  wait  output  steer  cancel  resume  handoff
 ```
 
 Native harness subagents remain an optional execution strategy. Independent worker processes are the default because they support separate models, credentials, sandboxes, worktrees, and harnesses.
@@ -78,11 +78,13 @@ Create a YAML delegation using the [request contract](docs/protocol.md), with th
 node dist/src/cli.js delegate --request /absolute/path/to/request.yaml
 node dist/src/cli.js wait --task TASK_ID --timeout-ms 180000
 node dist/src/cli.js inspect --task TASK_ID
+node dist/src/cli.js output --task TASK_ID
+node dist/src/cli.js output --task TASK_ID --attempt attempt-01 --source result
 node dist/src/cli.js steer --task TASK_ID --message 'Check another case'
 node dist/src/cli.js handoff --task TASK_ID --harness deepseek --model APPROVED_DIFFERENT_ENGINE
 ```
 
-All CLI commands return JSON on stdout and errors on stderr. `list`, `inspect`, and `wait` are read-only; `delegate`, `steer`, `cancel`, `resume`, and `handoff` require the active lead ID. Completed worktrees and task bundles remain for inspection. The first release allows worker network egress; the proxy controls access to the shared LiteLLM credential and allowed model alias. Codex and DeepSeek use the controller's outer macOS sandbox for filesystem enforcement so their shell tools can run inside their allocated checkouts.
+All CLI commands return JSON on stdout and errors on stderr. `list` shows each task's current harness and selected model. `inspect` includes `current_attempt` and the full attempt history, including resolved model groups when available. `wait` includes the current harness and model. `output` returns the latest attempt's captured harness output; use `--attempt` for an earlier attempt, `--source harness|stderr|result|supervisor|error|routes` to choose a record, and `--lines N` for the last 1–1000 log lines (default 100). Repeat `output` while a worker runs to see new records. `list`, `inspect`, `wait`, and `output` are read-only; `delegate`, `steer`, `cancel`, `resume`, and `handoff` require the active lead ID. Completed worktrees and task bundles remain for inspection. The first release allows worker network egress; the proxy controls access to the shared LiteLLM credential and allowed model alias. Codex and DeepSeek use the controller's outer macOS sandbox for filesystem enforcement so their shell tools can run inside their allocated checkouts.
 
 Run `lead-release --project PROJECT_ID` with the active lead ID to release ownership immediately; otherwise another lead may acquire it after the lease expires.
 

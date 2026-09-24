@@ -86,7 +86,13 @@ async function runCodex(request: TaskRequest, effective: AttemptRequest, home: s
 async function runDeepSeek(_request: TaskRequest, effective: AttemptRequest, home: string, proxyHandle: ProxyHandle, gatewayKeyName: string): Promise<{ text: string; nativeSessionId?: string }> {
   const dshHome = join(home, 'dsh')
   await mkdir(dshHome, { recursive: true })
-  const patch = [{ id: 'llm-pi-ai', config: { providers: { litellm: { apiKeyEnv: 'AGENT_HARNESS_PROXY_TOKEN', api: 'openai-completions', baseURL: proxyHandle.baseUrl, models: [{ id: effective.model }] } } } }, { id: 'tool-web', disabled: true }, { id: 'tool-subagent', disabled: true }, { id: 'tool-subagent-fork', disabled: true }]
+  const patch = [
+    { id: 'llm-pi-ai', config: { providers: { litellm: { apiKeyEnv: 'AGENT_HARNESS_PROXY_TOKEN', api: 'openai-completions', baseURL: proxyHandle.baseUrl, models: [{ id: effective.model }] } } } },
+    { id: 'sandbox-policy', config: { mode: 'danger-full-access', workspaceRoot: effective.workspace_path } },
+    { id: 'approval', config: { policy: 'never' } },
+    { id: 'permission', config: { presets: { 'read-only': { sandbox: 'read-only', approval: 'ask' }, 'workspace-write': { sandbox: 'workspace-write', approval: 'ask' }, 'danger-full-access': { sandbox: 'danger-full-access', approval: 'never' } }, defaultPreset: 'danger-full-access' } },
+    { id: 'tool-web', disabled: true }, { id: 'tool-subagent', disabled: true }, { id: 'tool-subagent-fork', disabled: true }
+  ]
   const patchPath = join(aDir, 'dsh-provider.patch.yml')
   await atomicWrite(patchPath, YAML.stringify(patch))
   const env = scrubbedEnv({ HOME: home, TMPDIR: join(home, 'tmp'), DSH_HOME: dshHome, DSH_PERMISSION_MODE: _request.role === 'code-explorer' ? 'read-only' : 'workspace-write', DSH_TELEMETRY_MODE: 'OFF', AGENT_HARNESS_PROXY_TOKEN: proxyHandle.token }, gatewayKeyName)

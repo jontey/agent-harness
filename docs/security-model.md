@@ -118,6 +118,8 @@ Network access is denied by default for source exploration, planning, and review
 
 The first release deliberately uses `network: allow` for its two supported roles. macOS sandbox profiles restrict filesystem writes, but worker network egress is unrestricted. The policy and request must declare this accurately; destination filtering is not part of this release.
 
+The DeepSeek adapter enables its internal shell tools with a per-attempt `danger-full-access` SDK patch. The outer `sandbox-exec` profile remains the filesystem boundary: explorer shell writes to the source checkout fail, and implementer shell writes to the original checkout fail. This configuration does not restrict network egress.
+
 ## 7. Tool policy
 
 Roles declare capabilities such as:

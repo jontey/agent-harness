@@ -1,6 +1,6 @@
 import http, { type IncomingMessage, type ServerResponse } from 'node:http'
 import { randomBytes } from 'node:crypto'
-import { Readable } from 'node:stream'
+import { once } from 'node:events'
 import { appendFile } from 'node:fs/promises'
 import type { Policy } from './types.js'
 
@@ -89,12 +89,32 @@ export async function startProxy(options: { policy: Policy; alias: string; taskI
       response.end(body)
       return
     }
-    await record()
     response.writeHead(upstreamResponse.status, headers)
-    if (upstreamResponse.body) await new Promise<void>((resolve, reject) => {
-      Readable.fromWeb(upstreamResponse.body as never).on('error', reject).pipe(response).on('finish', resolve).on('error', reject)
-    })
-    else response.end()
+    if (upstreamResponse.body) {
+      const decoder = new TextDecoder()
+      let pending = ''
+      for await (const chunk of upstreamResponse.body) {
+        const bytes = Buffer.from(chunk)
+        pending += decoder.decode(bytes, { stream: true })
+        for (;;) {
+          const newline = pending.indexOf('\n')
+          if (newline < 0) break
+          const line = pending.slice(0, newline).trimEnd()
+          pending = pending.slice(newline + 1)
+          if (!line.startsWith('data:')) continue
+          try {
+            const event = JSON.parse(line.slice(5).trim()) as { usage?: { input_tokens?: number; output_tokens?: number; prompt_tokens?: number; completion_tokens?: number }; response?: { usage?: { input_tokens?: number; output_tokens?: number; prompt_tokens?: number; completion_tokens?: number } } }
+            const usage = event.response?.usage ?? event.usage
+            evidence.input_tokens = usage?.input_tokens ?? usage?.prompt_tokens ?? evidence.input_tokens
+            evidence.output_tokens = usage?.output_tokens ?? usage?.completion_tokens ?? evidence.output_tokens
+          } catch { /* other SSE frames are forwarded unchanged */ }
+        }
+        if (pending.length > 1024 * 1024) pending = ''
+        if (!response.write(bytes)) await once(response, 'drain')
+      }
+    }
+    await record()
+    response.end()
   }
   await new Promise<void>((resolve, reject) => server.listen(0, '127.0.0.1', () => resolve()).once('error', reject))
   const address = server.address()

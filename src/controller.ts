@@ -165,12 +165,26 @@ export async function delegate(requestFile: string, contextFile?: string): Promi
   await mkdir(join(dir, 'artifacts'), { recursive: true })
   await appendEvent(dir, 'task.created', { task_id: taskId })
   await appendEvent(dir, 'policy.approved', { role: request.role, harness: request.harness, model: request.model })
-  const workspace = await workspaceFor(policy, request, taskId)
-  await appendEvent(dir, 'workspace.created', { path: workspace, strategy: request.workspace.strategy })
-  await atomicWrite(join(dir, 'workspace.txt'), workspace + '\n')
+  await atomicJson(join(dir, 'session.json'), { schema_version: 1, current_attempt_id: '', attempts: [] })
+  await setStatus(dir, taskId, '', 'queued', 'preparing workspace')
   await updateTaskIndex(policy.state_root, request.project_id, taskId)
-  const attemptId = await startAttempt(policy, request, dir, request.harness, request.model, 'initial')
-  return { task_id: taskId, attempt_id: attemptId, state: 'starting' }
+  try {
+    const workspace = await workspaceFor(policy, request, taskId)
+    await appendEvent(dir, 'workspace.created', { path: workspace, strategy: request.workspace.strategy })
+    await atomicWrite(join(dir, 'workspace.txt'), workspace + '\n')
+    const attemptId = await startAttempt(policy, request, dir, request.harness, request.model, 'initial')
+    return { task_id: taskId, attempt_id: attemptId, state: 'starting' }
+  } catch (error) {
+    const session = await json<Session>(join(dir, 'session.json'))
+    const attempt = session.attempts.at(-1)
+    if (attempt) {
+      attempt.state = 'failed'
+      await atomicJson(join(dir, 'session.json'), session)
+    }
+    await setStatus(dir, taskId, attempt?.attempt_id ?? '', 'failed', `launch failed: ${String(error)}`)
+    await appendEvent(dir, 'worker.failed', { attempt_id: attempt?.attempt_id ?? null, reason: String(error) })
+    throw error
+  }
 }
 
 export async function startAttempt(policy: Policy, request: TaskRequest, dir: string, harness: Harness, model: string, kind: AttemptRequest['kind'], steeringId?: number): Promise<string> {
@@ -335,7 +349,7 @@ export async function list(projectId?: string): Promise<Array<{ task_id: string;
   const result = []
   for (const id of ids) {
     const item = await inspect(id).catch(() => null)
-    if (item) result.push({ task_id: id, state: item.status.state, role: item.request.role, harness: item.session.attempts.at(-1)!.harness })
+    if (item) result.push({ task_id: id, state: item.status.state, role: item.request.role, harness: item.session.attempts.at(-1)?.harness ?? item.request.harness })
   }
   return result
 }

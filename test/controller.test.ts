@@ -88,6 +88,9 @@ test('writer conflict releases the failed attempt resume lease', async () => {
     await assert.rejects(delegate(f.requestFile), /resource already leased/)
     const [taskId] = await directories(join(f.stateRoot, 'tasks'))
     assert.ok(taskId)
+    const failed = await inspect(taskId)
+    assert.equal(failed.status.state, 'failed')
+    assert.match(failed.status.summary, /resource already leased/)
     await acquireLease(f.stateRoot, `resume:${taskId}`, 'replacement-attempt')
     await releaseLease(f.stateRoot, `writer:${f.repo}`, 'other-task')
   } finally { await rm(f.base, { recursive: true, force: true }) }

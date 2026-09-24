@@ -91,6 +91,10 @@ Models intended for the lead role additionally must correctly form delegation ca
 - Two leads attempt to acquire the same lease.
 - A resumed native session is unavailable.
 - A handoff destination fails after the source checkpoint is written.
+- Cancelling an active implementer retains the writer lease while the supervisor still runs.
+- A cancel that exceeds its grace period records `worker.stop_pending` and recovers on the next reconcile.
+- A controller crash mid-cancel leaves the writer lease in place until a later reconcile confirms the supervisor has exited.
+- A second implementer cannot acquire the writer lease while the first cancellation is still waiting for the supervisor.
 
 Each case must end in a deterministic recoverable state with no silent task loss.
 

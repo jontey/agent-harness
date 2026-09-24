@@ -82,7 +82,7 @@ node dist/src/cli.js steer --task TASK_ID --message 'Check another case'
 node dist/src/cli.js handoff --task TASK_ID --harness deepseek --model APPROVED_DIFFERENT_ENGINE
 ```
 
-All CLI commands return JSON on stdout and errors on stderr. `list`, `inspect`, and `wait` are read-only; `delegate`, `steer`, `cancel`, `resume`, and `handoff` require the active lead ID. Completed worktrees and task bundles remain for inspection. The first release allows worker network egress; the proxy controls access to the shared LiteLLM credential and allowed model alias. Codex's own sandbox is disabled inside the controller's macOS sandbox so shell tools work in read-only checkouts; the outer sandbox enforces filesystem boundaries.
+All CLI commands return JSON on stdout and errors on stderr. `list`, `inspect`, and `wait` are read-only; `delegate`, `steer`, `cancel`, `resume`, and `handoff` require the active lead ID. Completed worktrees and task bundles remain for inspection. The first release allows worker network egress; the proxy controls access to the shared LiteLLM credential and allowed model alias. Codex and DeepSeek use the controller's outer macOS sandbox for filesystem enforcement so their shell tools can run inside their allocated checkouts.
 
 Run `lead-release --project PROJECT_ID` with the active lead ID to release ownership immediately; otherwise another lead may acquire it after the lease expires.
 

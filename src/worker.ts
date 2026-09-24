@@ -122,8 +122,8 @@ async function run(): Promise<void> {
       void setStatus(dir, request.task_id!, attemptId, 'running', 'worker active')
       void appendEvent(dir, 'worker.heartbeat', { attempt_id: attemptId })
       void acquireLease(policy.state_root, `resume:${request.task_id!}`, attemptId).catch(error => appendEvent(dir, 'policy.violation', { attempt_id: attemptId, reason: String(error) }))
-      if (request.role === 'code-implementer') void acquireLease(policy.state_root, `writer:${request.workspace.repository}`, request.task_id!).catch(error => appendEvent(dir, 'policy.violation', { attempt_id: attemptId, reason: String(error) }))
     }
+    if (request.role === 'code-implementer') void acquireLease(policy.state_root, `writer:${request.workspace.repository}`, request.task_id!).catch(error => appendEvent(dir, 'policy.violation', { attempt_id: attemptId, reason: String(error) }))
   }, policy.defaults.heartbeat_interval_seconds * 1000)
   heartbeat.unref()
   try {

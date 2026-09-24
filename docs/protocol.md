@@ -259,6 +259,10 @@ Use short-lived renewable leases for:
 
 Lease files include owner, host, PID identity, acquisition time, heartbeat, expiry, and resource. All changes occur under an atomic filesystem lock. Stale leases can be reclaimed after expiry and process validation.
 
+### Writer lease lifecycle
+
+The writer lease protects a repository from a second implementer while the current worker can still write. Normal completion releases it after the harness subprocess stops. Cancellation retains it until the supervisor process (matched by PID and macOS process birth) is no longer running. A cancel that exceeds its grace period records `worker.stop_pending`; later reconciliation releases the lease after process exit. An expired writer lease cannot be claimed by another task while its recorded supervisor remains alive.
+
 ## 12. Failure recovery
 
 On controller restart:

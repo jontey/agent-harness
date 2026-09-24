@@ -214,6 +214,8 @@ Read-only workers may run concurrently when their tasks are independent. Writabl
 
 The controller may allow parallel implementation work when each worker has a distinct worktree and file ownership boundaries. Integration remains a separate explicit task.
 
+During cancellation, the writer lease stays held until the supervisor exits. A cancel sends SIGTERM and waits up to the policy-defined grace period. If the supervisor still runs, a later reconcile releases the lease only after confirming its PID and birth time no longer match a live process. An expired writer lease remains fenced while that supervisor is alive. Completed workers release the lease after their harness subprocess has stopped.
+
 ## 6. Trust and verification
 
 Worker summaries are claims. Later stages validate them against files, diffs, command output, or fresh practical evidence.

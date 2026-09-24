@@ -68,7 +68,7 @@ export interface Session {
 export interface Policy {
   schema_version: 1
   state_root: string
-  defaults: { heartbeat_interval_seconds: number; stale_after_seconds: number; require_resolved_route: boolean; allow_cross_engine_fallback: boolean; max_correction_cycles?: number }
+  defaults: { heartbeat_interval_seconds: number; stale_after_seconds: number; require_resolved_route: boolean; allow_cross_engine_fallback: boolean; max_correction_cycles?: number; cancel_grace_seconds?: number }
   providers: { litellm: { base_url_env: string; api_key_env: string } }
   models: Record<string, { engine_id: string; litellm_model_group: string; permitted_fallback_engines: string[] }>
   roles: Record<string, { allowed_harnesses: Harness[]; allowed_models: string[]; filesystem: string; network: string; workspace_strategy: string; tools: string[]; exclusive_writer?: boolean }>

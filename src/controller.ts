@@ -11,7 +11,68 @@ import { appendEvent, atomicJson, atomicWrite, directories, exists, json, now, s
 import { validateRequest, type Attempt, type AttemptRequest, type Harness, type Policy, type Session, type Status, type TaskRequest } from './types.js'
 
 const exec = promisify(execFile)
+const POLL_INTERVAL_MS = 100
+const DEFAULT_CANCEL_GRACE_SECONDS = 30
 const moduleDir = dirname(fileURLToPath(import.meta.url))
+
+export async function processBirth(pid: number): Promise<string> {
+  const result = await exec('ps', ['-p', String(pid), '-o', 'lstart='])
+  return result.stdout.trim()
+}
+
+export async function isProcessAlive(pid: number | undefined, expectedBirth: string | undefined): Promise<boolean> {
+  if (!pid) return false
+  const birth = await processBirth(pid).catch(() => '')
+  if (!birth || (expectedBirth && birth !== expectedBirth)) return false
+  // Defensively treat zombies as no longer alive so a reaped supervisor does not indefinitely
+  // block the writer lease release after a cancel or reconciliation.
+  const state = await exec('ps', ['-p', String(pid), '-o', 'stat=']).then(x => x.stdout.trim()).catch(() => '')
+  if (state.startsWith('Z')) return false
+  return true
+}
+
+export async function awaitSupervisorExit(pid: number | undefined, expectedBirth: string | undefined, graceMs: number): Promise<{ exited: boolean; observedBirth: string }> {
+  if (!pid) return { exited: true, observedBirth: '' }
+  const deadline = Date.now() + graceMs
+  while (Date.now() < deadline) {
+    const observed = await processBirth(pid).catch(() => '')
+    if (!observed || (expectedBirth && observed !== expectedBirth)) return { exited: true, observedBirth: observed }
+    const state = await exec('ps', ['-p', String(pid), '-o', 'stat=']).then(x => x.stdout.trim()).catch(() => '')
+    if (state.startsWith('Z')) return { exited: true, observedBirth: observed }
+    await sleep(POLL_INTERVAL_MS)
+  }
+  const observed = await processBirth(pid).catch(() => '')
+  const state = await exec('ps', ['-p', String(pid), '-o', 'stat=']).then(x => x.stdout.trim()).catch(() => '')
+  return { exited: !observed || state.startsWith('Z') || (!!expectedBirth && observed !== expectedBirth), observedBirth: observed }
+}
+
+function writerLeasePath(root: string, repository: string): string {
+  return join(root, 'orchestrator', 'locks', `${createHash('sha256').update(`writer:${repository}`).digest('hex')}.json`)
+}
+
+async function writerLeaseHeld(root: string, repository: string, owner: string): Promise<boolean> {
+  const path = writerLeasePath(root, repository)
+  if (!await exists(path)) return false
+  const current = await json<{ owner?: string }>(path).catch(() => null)
+  return current?.owner === owner
+}
+
+async function maybeReleaseWriterLease(dir: string, policy: Policy, owner: string, status: Status): Promise<{ released: boolean; reason: string }> {
+  const request = await readRequest(dir)
+  if (request.role !== 'code-implementer') return { released: false, reason: 'role does not hold a writer lease' }
+  if (!status.attempt_id) return { released: false, reason: 'attempt not recorded' }
+  const session = await json<Session>(join(dir, 'session.json')).catch(() => null)
+  const attempt = session?.attempts.find(x => x.attempt_id === status.attempt_id)
+  if (attempt?.supervisor_pid) {
+    const alive = await isProcessAlive(attempt.supervisor_pid, attempt.supervisor_started_at)
+    if (alive) return { released: false, reason: 'supervisor still alive' }
+  }
+  if (!await writerLeaseHeld(policy.state_root, request.workspace.repository, owner)) return { released: false, reason: 'lease not held by this task' }
+  await releaseLease(policy.state_root, `writer:${request.workspace.repository}`, owner)
+  await appendEvent(dir, 'lease.released', { resource: `writer:${request.workspace.repository}`, owner, after: 'supervisor exit' })
+  return { released: true, reason: 'supervisor exited' }
+}
+
 export const taskDir = (root: string, taskId: string) => {
   if (!/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}$/.test(taskId)) throw new Error('invalid task ID')
   return join(root, 'tasks', taskId)
@@ -120,6 +181,7 @@ export async function startAttempt(policy: Policy, request: TaskRequest, dir: st
     const session = await json<Session>(join(dir, 'session.json')).catch(() => ({ schema_version: 1 as const, current_attempt_id: '', attempts: [] as Attempt[] }))
     const latest = session.attempts.at(-1)
     if (latest && !['completed', 'failed', 'cancelled'].includes(latest.state)) throw new Error('current attempt is still active')
+    if (latest?.supervisor_pid && !(await awaitSupervisorExit(latest.supervisor_pid, latest.supervisor_started_at, 5000)).exited) throw new Error('previous supervisor is still active')
     const attemptId = `attempt-${String(session.attempts.length + 1).padStart(2, '0')}`
     await acquireLease(policy.state_root, `resume:${taskId}`, attemptId)
     let writerAcquired = false
@@ -177,30 +239,38 @@ export async function setStatus(dir: string, taskId: string, attemptId: string, 
   })
 }
 
-export async function processBirth(pid: number): Promise<string> {
-  const result = await exec('ps', ['-p', String(pid), '-o', 'lstart='])
-  return result.stdout.trim()
-}
-
 export async function reconcile(dir: string, policy: Policy): Promise<Status> {
   const status = await json<Status>(join(dir, 'status.json'))
-  if (status.terminal) return status
+  if (status.terminal) {
+    await maybeReleaseWriterLease(dir, policy, status.task_id, status)
+    return status
+  }
   const session = await json<Session>(join(dir, 'session.json')).catch(() => null)
   if (!session) {
     if (Date.now() - Date.parse(status.updated_at) < policy.defaults.stale_after_seconds * 1000) return status
-    return setStatus(dir, status.task_id, status.attempt_id, 'failed', 'launch record missing after controller restart')
+    const failed = await setStatus(dir, status.task_id, status.attempt_id, 'failed', 'launch record missing after controller restart')
+    await maybeReleaseWriterLease(dir, policy, status.task_id, failed)
+    return failed
   }
   const attempt = session.attempts.find(x => x.attempt_id === status.attempt_id)
   if (!attempt?.supervisor_pid) {
     if (Date.now() - Date.parse(status.updated_at) < policy.defaults.stale_after_seconds * 1000) return status
-    return finalizeMissing(dir, status, policy, 'supervisor was never recorded')
+    const finalized = await finalizeMissing(dir, status, policy, 'supervisor was never recorded')
+    await maybeReleaseWriterLease(dir, policy, status.task_id, finalized)
+    return finalized
   }
   const birth = await processBirth(attempt.supervisor_pid).catch(() => '')
   const processState = await exec('ps', ['-p', String(attempt.supervisor_pid), '-o', 'stat=']).then(x => x.stdout.trim()).catch(() => '')
-  if (!birth || processState.startsWith('Z') || (attempt.supervisor_started_at && birth !== attempt.supervisor_started_at)) return finalizeMissing(dir, status, policy, 'supervisor exited without terminal record')
+  if (!birth || processState.startsWith('Z') || (attempt.supervisor_started_at && birth !== attempt.supervisor_started_at)) {
+    const finalized = await finalizeMissing(dir, status, policy, 'supervisor exited without terminal record')
+    await maybeReleaseWriterLease(dir, policy, status.task_id, finalized)
+    return finalized
+  }
   if (Date.now() - Date.parse(status.heartbeat_at) > policy.defaults.stale_after_seconds * 1000) {
     process.kill(attempt.supervisor_pid, 'SIGTERM')
-    return finalizeMissing(dir, status, policy, 'supervisor heartbeat stale')
+    const finalized = await finalizeMissing(dir, status, policy, 'supervisor heartbeat stale')
+    await maybeReleaseWriterLease(dir, policy, status.task_id, finalized)
+    return finalized
   }
   return status
 }
@@ -241,6 +311,11 @@ export async function recoverQueuedSteering(dir: string, policy: Policy): Promis
   const sequence = Number(await readFile(join(dir, 'steering', 'sequence'), 'utf8').catch(() => '0'))
   if (!sequence) return
   const session = await json<Session>(join(dir, 'session.json'))
+  const last = session.attempts.at(-1)!
+  // The worker releases its writer lease inside completeAttempt before the supervisor
+  // process exits, so a queued steering correction must wait for that supervisor to exit.
+  // Starting a new attempt here would fail in startAttempt while the old supervisor runs.
+  if (last.supervisor_pid && await isProcessAlive(last.supervisor_pid, last.supervisor_started_at)) return
   const consumed = new Set<number>()
   for (const attempt of session.attempts) {
     const effective = YAML.parse(await readFile(join(attemptDir(dir, attempt.attempt_id), 'request.yaml'), 'utf8')) as AttemptRequest
@@ -249,7 +324,6 @@ export async function recoverQueuedSteering(dir: string, policy: Policy): Promis
   const pending = Array.from({ length: sequence }, (_, i) => i + 1).find(id => !consumed.has(id))
   if (!pending) return
   const request = await readRequest(dir)
-  const last = session.attempts.at(-1)!
   await startAttempt(policy, request, dir, last.harness, last.requested_model, 'correction', pending).catch(error => {
     if (!String(error).includes('current attempt is still active')) throw error
   })
@@ -337,23 +411,43 @@ export async function handoff(taskId: string, harness: Harness, model: string): 
   return { attempt_id: await startAttempt(policy, request, dir, harness, model, 'handoff') }
 }
 
-export async function cancel(taskId: string): Promise<{ task_id: string; state: string }> {
+export async function cancel(taskId: string): Promise<{ task_id: string; state: string; writer_lease_released: boolean }> {
   const policy = await loadPolicy()
   const dir = taskDir(policy.state_root, taskId)
   await requireLead(policy, (await readRequest(dir)).project_id)
   const status = await reconcile(dir, policy)
-  if (status.terminal) return { task_id: taskId, state: status.state }
+  if (status.terminal) {
+    const release = await maybeReleaseWriterLease(dir, policy, taskId, status)
+    return { task_id: taskId, state: status.state, writer_lease_released: release.released }
+  }
   const session = await json<Session>(join(dir, 'session.json'))
   const current = session.attempts.at(-1)!
-  if (current.supervisor_pid && current.supervisor_started_at && await processBirth(current.supervisor_pid).catch(() => '') === current.supervisor_started_at) process.kill(current.supervisor_pid, 'SIGTERM')
+  const supervisorPid = current.supervisor_pid
+  const supervisorBirth = current.supervisor_started_at
+  const supervisorAlive = await isProcessAlive(supervisorPid, supervisorBirth)
+  if (supervisorAlive && supervisorPid) process.kill(supervisorPid, 'SIGTERM')
   await setStatus(dir, taskId, current.attempt_id, 'cancelled', 'cancel requested')
   current.state = 'cancelled'
   await atomicJson(join(dir, 'session.json'), session)
-  await appendEvent(dir, 'worker.cancelled', { attempt_id: current.attempt_id })
+  await appendEvent(dir, 'worker.cancelled', { attempt_id: current.attempt_id, supervisor_pid: supervisorPid, supervisor_alive: supervisorAlive })
   const request = await readRequest(dir)
-  if (request.role === 'code-implementer') await releaseLease(policy.state_root, `writer:${request.workspace.repository}`, taskId)
+  const graceSeconds = policy.defaults.cancel_grace_seconds ?? DEFAULT_CANCEL_GRACE_SECONDS
+  const graceMs = graceSeconds * 1000
+  let writerLeaseReleased = true
+  if (request.role === 'code-implementer') {
+    if (supervisorAlive) {
+      const { exited } = await awaitSupervisorExit(supervisorPid, supervisorBirth, graceMs)
+      if (exited) {
+        await appendEvent(dir, 'worker.exited', { attempt_id: current.attempt_id })
+      } else {
+        writerLeaseReleased = false
+        await appendEvent(dir, 'worker.stop_pending', { attempt_id: current.attempt_id, grace_ms: graceMs, supervisor_pid: supervisorPid, supervisor_birth: supervisorBirth, reason: 'supervisor did not exit within cancel grace; writer lease retained until next reconcile or cancel' })
+      }
+    }
+    if (writerLeaseReleased) await releaseLease(policy.state_root, `writer:${request.workspace.repository}`, taskId)
+  }
   await releaseLease(policy.state_root, `resume:${taskId}`, current.attempt_id)
-  return { task_id: taskId, state: 'cancelled' }
+  return { task_id: taskId, state: 'cancelled', writer_lease_released: writerLeaseReleased }
 }
 
 async function readRequest(dir: string): Promise<TaskRequest> { return validateRequest(YAML.parse(await readFile(join(dir, 'request.yaml'), 'utf8'))) }
@@ -378,7 +472,9 @@ export async function completeAttempt(dir: string, attemptId: string, state: Sta
   const policy = await loadPolicy()
   await releaseLease(policy.state_root, `resume:${request.task_id!}`, attemptId)
   if (state === 'completed' && (await readFile(join(dir, 'attempts', attemptId, 'request.yaml'), 'utf8')).includes('kind: handoff')) await appendEvent(dir, 'handoff.completed', { attempt_id: attemptId })
-  if (request.role === 'code-implementer') {
-    await releaseLease(policy.state_root, `writer:${request.workspace.repository}`, request.task_id!)
-  }
+  // Normal completed/failed finish: result files are already written above and the worker
+  // performs no further workspace writes, so release the writer lease now even though the
+  // supervisor process is still alive. The cancelled path returns earlier in this function
+  // and keeps the lease until the supervisor has exited (see cancel/reconcile).
+  if (request.role === 'code-implementer') await releaseLease(policy.state_root, `writer:${request.workspace.repository}`, request.task_id!)
 }

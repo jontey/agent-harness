@@ -7,7 +7,7 @@ import { join } from 'node:path'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import YAML from 'yaml'
-import { delegate, handoff, initialize, inspect, steer, wait } from '../src/controller.js'
+import { awaitSupervisorExit, delegate, handoff, initialize, inspect, steer, wait } from '../src/controller.js'
 import type { Policy, TaskRequest } from '../src/types.js'
 
 const exec = promisify(execFile)
@@ -45,6 +45,8 @@ test('Codex correction then DeepSeek handoff through the controller proxy', { ti
   await new Promise<void>(resolve => upstream.listen(0, '127.0.0.1', resolve))
   const address = upstream.address()
   if (!address || typeof address === 'string') throw new Error('upstream bind failed')
+  let activeTask: string | undefined
+  let stateRoot: string | undefined
   try {
     process.env.TEST_GATEWAY_URL = `http://127.0.0.1:${address.port}/v1`
     process.env.TEST_GATEWAY_KEY = 'mock-key'
@@ -53,7 +55,7 @@ test('Codex correction then DeepSeek handoff through the controller proxy', { ti
     await writeFile(join(repo, 'README.md'), 'The secret word is orange.\n')
     await exec('git', ['-C', repo, 'add', '.'])
     await exec('git', ['-C', repo, '-c', 'user.name=Test', '-c', 'user.email=test@example.com', 'commit', '-m', 'initial'])
-    const stateRoot = join(base, 'state')
+    stateRoot = join(base, 'state')
     const policyPath = join(base, 'policy.yaml')
     const policy: Policy = { schema_version: 1, state_root: stateRoot, defaults: { heartbeat_interval_seconds: 1, stale_after_seconds: 10, require_resolved_route: true, allow_cross_engine_fallback: false }, providers: { litellm: { base_url_env: 'TEST_GATEWAY_URL', api_key_env: 'TEST_GATEWAY_KEY' } }, models: { alpha: { engine_id: 'a', litellm_model_group: 'alpha', permitted_fallback_engines: [] }, beta: { engine_id: 'b', litellm_model_group: 'beta', permitted_fallback_engines: [] } }, roles: { 'code-explorer': { allowed_harnesses: ['codex', 'deepseek'], allowed_models: ['alpha', 'beta'], filesystem: 'read-only', network: 'allow', workspace_strategy: 'read-only-checkout', tools: ['file-read', 'search'] } }, workflow: { require_adjacent_engine_diversity: true } }
     await writeFile(policyPath, YAML.stringify(policy))
@@ -64,6 +66,7 @@ test('Codex correction then DeepSeek handoff through the controller proxy', { ti
     const requestFile = join(base, 'request.yaml')
     await writeFile(requestFile, YAML.stringify(request))
     const delegated = await delegate(requestFile)
+    activeTask = delegated.task_id
     await steer(delegated.task_id, 'Confirm the filename.')
     const second = await wait(delegated.task_id, 30000)
     if (second.state !== 'completed') throw new Error(`Codex: ${second.summary}; ${(await readFile(join(stateRoot, 'tasks', delegated.task_id, 'attempts', 'attempt-01', 'error.log'), 'utf8').catch(() => '')).slice(-1000)}`)
@@ -76,6 +79,10 @@ test('Codex correction then DeepSeek handoff through the controller proxy', { ti
     assert.equal(bundle.session.attempts[0].resolved_model_group, 'alpha')
     assert.equal(bundle.session.attempts[2].resolved_model_group, 'beta')
   } finally {
+    if (activeTask && stateRoot) {
+      const session = JSON.parse(await readFile(join(stateRoot, 'tasks', activeTask, 'session.json'), 'utf8')) as { attempts: Array<{ supervisor_pid?: number; supervisor_started_at?: string }> }
+      for (const attempt of session.attempts) await awaitSupervisorExit(attempt.supervisor_pid, attempt.supervisor_started_at, 10000)
+    }
     await new Promise<void>(resolve => upstream.close(() => resolve()))
     await rm(base, { recursive: true, force: true })
     delete process.env.TEST_GATEWAY_URL

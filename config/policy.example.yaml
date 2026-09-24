@@ -9,6 +9,7 @@ defaults:
   max_correction_cycles: 3
   heartbeat_interval_seconds: 15
   stale_after_seconds: 90
+  cancel_grace_seconds: 30
 
 providers:
   litellm:

@@ -86,7 +86,7 @@ The DSH SDK can start a fresh subprocess with its own profile, provider, model, 
 
 Current limitation: SDK subprocess runs are one-shot and do not provide the same continuable child messaging interface. Corrections start a new run with the full artifact bundle and latest checkpoint.
 
-The first release uses the official `@deepseek-ai/dsh-sdk-client` and same-version `@deepseek-ai/dsh` packages, pinned together. It creates an isolated DSH home and per-attempt profile patch with a single `litellm` route using `openai-completions`. The SDK subprocess receives the task workspace and a proxy token, while the supervisor retains the shared LiteLLM key. Live gateway conformance remains an environment-dependent release check.
+The first release uses the official `@deepseek-ai/dsh-sdk-client` and same-version `@deepseek-ai/dsh` packages, pinned together. It creates an isolated DSH home and per-attempt profile patch with a single `litellm` route using `openai-completions`. The SDK subprocess receives the task workspace and a proxy token, while the supervisor retains the shared LiteLLM key. The DeepSeek inner shell sandbox is set to `danger-full-access` because this macOS host reported no usable inner backend; the controller's outer macOS sandbox enforces the filesystem boundary for the entire subprocess tree.
 
 ### 3.3 Role configuration
 

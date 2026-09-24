@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "current_attempt_id": "attempt-01",
+  "attempts": [
+    {
+      "attempt_id": "attempt-01",
+      "harness": "codex",
+      "native_session_id": "opaque-harness-value",
+      "pid": 12345,
+      "process_started_at": "2026-09-24T10:30:00Z",
+      "requested_model": "north-mini-code",
+      "resolved_model_group": "north-mini-code",
+      "resolved_deployment_id": "deployment-17",
+      "fallback_count": 0,
+      "continuation_supported": true,
+      "state": "running"
+    }
+  ]
+}

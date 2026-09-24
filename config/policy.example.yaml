@@ -1,0 +1,135 @@
+schema_version: 1
+
+state_root: ~/workspace/lead-context
+
+defaults:
+  provider: litellm
+  require_resolved_route: true
+  allow_cross_engine_fallback: false
+  max_correction_cycles: 3
+  heartbeat_interval_seconds: 15
+  stale_after_seconds: 90
+
+providers:
+  litellm:
+    base_url_env: LITELLM_BASE_URL
+    api_key_env: LITELLM_API_KEY
+    metadata:
+      include: [project_id, task_id, attempt_id, role, harness]
+
+models:
+  minimax-m3:
+    engine_id: minimax-m3
+    litellm_model_group: minimax-m3
+    permitted_fallback_engines: []
+  laguna-s-2-1:
+    engine_id: laguna-s-2-1
+    litellm_model_group: laguna-s-2-1
+    permitted_fallback_engines: []
+  north-mini-code:
+    engine_id: north-mini
+    litellm_model_group: north-mini-code
+    permitted_fallback_engines: []
+  nemotron-ultra:
+    engine_id: nemotron-ultra
+    litellm_model_group: nemotron-ultra
+    permitted_fallback_engines: []
+  nemotron-lightning:
+    engine_id: nemotron-lightning
+    litellm_model_group: nemotron-lightning
+    permitted_fallback_engines: []
+  glm-flash:
+    engine_id: glm-flash
+    litellm_model_group: glm-flash
+    permitted_fallback_engines: []
+  kimi-code:
+    engine_id: kimi-code
+    litellm_model_group: kimi-code
+    permitted_fallback_engines: []
+  lfm-2-5-2-6b:
+    engine_id: lfm-2-5-2-6b
+    litellm_model_group: lfm-2-5-2-6b
+    permitted_fallback_engines: []
+
+roles:
+  code-explorer:
+    allowed_harnesses: [codex, deepseek]
+    allowed_models: [north-mini-code, laguna-s-2-1, nemotron-lightning, lfm-2-5-2-6b, glm-flash]
+    default_model: north-mini-code
+    filesystem: read-only
+    network: allow
+    tools: [file-read, search, shell-read, git-read]
+    workspace_strategy: read-only-checkout
+
+  task-planner:
+    allowed_harnesses: [codex, deepseek]
+    allowed_models: [minimax-m3, north-mini-code, glm-flash, kimi-code]
+    default_model: minimax-m3
+    filesystem: read-only
+    network: deny
+    tools: [file-read, search, shell-read, git-read]
+    workspace_strategy: read-only-checkout
+
+  code-implementer:
+    allowed_harnesses: [codex, deepseek]
+    allowed_models: [minimax-m3, north-mini-code, glm-flash, kimi-code]
+    default_model: minimax-m3
+    filesystem: workspace-write
+    network: allow
+    tools: [file-read, file-write, search, shell-write, test-run, git-read]
+    workspace_strategy: git-worktree
+    exclusive_writer: true
+
+  code-reviewer:
+    allowed_harnesses: [codex, deepseek, opencode]
+    allowed_models: [minimax-m3, glm-flash, kimi-code, nemotron-ultra]
+    default_model: minimax-m3
+    filesystem: read-only
+    network: deny
+    tools: [file-read, search, shell-read, git-read]
+    workspace_strategy: read-only-worktree
+
+  test-verifier:
+    allowed_harnesses: [codex, deepseek, opencode]
+    allowed_models: [minimax-m3, north-mini-code, glm-flash, kimi-code]
+    default_model: glm-flash
+    filesystem: disposable-write
+    network: policy
+    tools: [file-read, search, shell-write, test-run, git-read]
+    workspace_strategy: disposable-worktree
+
+  documentation-writer:
+    allowed_harnesses: [codex, deepseek, opencode]
+    allowed_models: [minimax-m3, glm-flash, kimi-code]
+    default_model: glm-flash
+    filesystem: workspace-write
+    network: deny
+    tools: [file-read, file-write, search, git-read]
+    workspace_strategy: git-worktree
+    path_allowlist: [docs/**, README*, CHANGELOG*]
+
+  commit-agent:
+    allowed_harnesses: [codex, opencode]
+    allowed_models: [minimax-m3]
+    default_model: minimax-m3
+    filesystem: workspace-write
+    network: allow
+    tools: [file-read, shell-write, git-read, git-write, publish]
+    workspace_strategy: existing-approved-worktree
+    requires_explicit_publication_request: true
+
+workflow:
+  require_adjacent_engine_diversity: true
+  stages: [code-explorer, task-planner, code-implementer, code-reviewer, test-verifier, documentation-writer, commit-agent]
+
+isolation_profiles:
+  read-only:
+    backend: os-sandbox
+    source_mount: read-only
+    artifact_mount: read-write
+  workspace-write:
+    backend: process
+    source_mount: worktree-read-write
+  disposable-write:
+    backend: process
+    source_mount: disposable-worktree-read-write

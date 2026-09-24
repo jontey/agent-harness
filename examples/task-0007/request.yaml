@@ -1,0 +1,29 @@
+schema_version: 1
+task_id: task-0007
+project_id: example-a1b2c3
+role: code-explorer
+harness: codex
+model: north-mini-code
+reasoning_effort: high
+objective: Trace how authentication state reaches the API client.
+scope:
+  include: [src/auth, src/api]
+  exclude: [vendor, generated]
+acceptance_criteria:
+  - Identify the state owner and transformation boundaries.
+  - Cite relevant files and symbols.
+  - Report unresolved ambiguity explicitly.
+permissions:
+  filesystem: read-only
+  network: allow
+  tools: [file-read, search, shell-read, git-read]
+workspace:
+  strategy: read-only-checkout
+  repository: /absolute/path/to/repository
+  git_ref: abc123
+parent:
+  task_id: lead-0001
+output_contract:
+  result: result.md
+  checkpoint: checkpoint.md
+  events: events.jsonl

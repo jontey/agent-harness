@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "task_id": "task-0007",
+  "state": "running",
+  "attempt_id": "attempt-01",
+  "revision": 8,
+  "updated_at": "2026-09-24T10:31:00Z",
+  "heartbeat_at": "2026-09-24T10:31:00Z",
+  "summary": "Tracing token refresh callers",
+  "needs_input": false,
+  "terminal": false
+}

@@ -1,0 +1,3 @@
+interface:
+  display_name: "Agent Harness"
+  short_description: "Delegate and inspect local harness workers"

@@ -1,5 +1,5 @@
 export type Role = 'code-explorer' | 'code-implementer'
-export type Harness = 'codex' | 'deepseek' | 'fake'
+export type Harness = 'codex' | 'deepseek' | 'opencode' | 'fake'
 export type State = 'queued' | 'starting' | 'running' | 'waiting_for_input' | 'completed' | 'failed' | 'cancelled'
 
 export interface TaskRequest {
@@ -181,8 +181,8 @@ export function validateRequest(value: unknown): TaskRequest {
   if (typeof value.role !== 'string' || !['code-explorer', 'code-implementer'].includes(value.role)) {
     throw new Error('request.role must be code-explorer or code-implementer')
   }
-  if (typeof value.harness !== 'string' || !['codex', 'deepseek', 'fake'].includes(value.harness)) {
-    throw new Error('request.harness must be codex, deepseek, or fake')
+  if (typeof value.harness !== 'string' || !['codex', 'deepseek', 'opencode', 'fake'].includes(value.harness)) {
+    throw new Error('request.harness must be codex, deepseek, opencode, or fake')
   }
   if (typeof value.model !== 'string' || !MODEL_PATTERN.test(value.model)) {
     throw new Error('request.model is required and must be a lowercase slug')

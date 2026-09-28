@@ -83,6 +83,84 @@ async function runCodex(request: TaskRequest, effective: AttemptRequest, home: s
   return { text, nativeSessionId }
 }
 
+async function runOpenCode(_request: TaskRequest, effective: AttemptRequest, home: string, proxyHandle: ProxyHandle, gatewayKeyName: string): Promise<{ text: string; nativeSessionId?: string }> {
+  const opencodeConfigDir = join(home, 'opencode-cfg-root')
+  await mkdir(opencodeConfigDir, { recursive: true })
+  // Pin opencode to an isolated provider so it cannot resolve the live gateway key
+  // nor the user's global plugin set. The proxy enforces model alias ownership and
+  // refuses any cross-engine fallback, matching the codex adapter's behaviour.
+  const providerName = 'agent-harness'
+  const config = {
+    provider: {
+      [providerName]: {
+        npm: '@ai-sdk/openai-compatible',
+        options: {
+          baseURL: proxyHandle.baseUrl,
+          apiKey: '{env:AGENT_HARNESS_PROXY_TOKEN}'
+        },
+        models: {
+          [effective.model]: {}
+        }
+      }
+    }
+  }
+  // opencode resolves $XDG_CONFIG_HOME/opencode/opencode.json, so XDG_CONFIG_HOME must
+  // point at the directory that *contains* the opencode/ subfolder, not at the
+  // opencode/ subfolder itself.
+  const opencodeConfigFileDir = join(opencodeConfigDir, 'opencode')
+  await mkdir(opencodeConfigFileDir, { recursive: true })
+  await atomicWrite(join(opencodeConfigFileDir, 'opencode.json'), JSON.stringify(config, null, 2))
+  const args = ['run', '--pure', '--format', 'json', '--model', `${providerName}/${effective.model}`, '--dir', effective.workspace_path, '-']
+  const env = scrubbedEnv({
+    HOME: home,
+    TMPDIR: join(home, 'tmp'),
+    XDG_CONFIG_HOME: opencodeConfigDir,
+    XDG_DATA_HOME: join(home, 'xdg-data'),
+    XDG_CACHE_HOME: join(home, 'xdg-cache'),
+    AGENT_HARNESS_PROXY_TOKEN: proxyHandle.token,
+    // Prevent the opencode CLI from fetching the global model catalog or self-updating
+    // during an isolated worker run. Both knobs are present in opencode 1.18.32 and were
+    // verified by a sentinel-host test: with OPENCODE_DISABLE_MODELS_FETCH=1 the worker
+    // makes zero outbound calls outside the per-attempt proxy, and without it opencode
+    // hits the configured OPENCODE_MODELS_URL once at startup. OPENCODE_DISABLE_AUTOUPDATE
+    // keeps the worker from triggering an upgrade mid-attempt.
+    OPENCODE_DISABLE_MODELS_FETCH: '1',
+    OPENCODE_DISABLE_AUTOUPDATE: '1'
+  }, gatewayKeyName)
+  const secrets = [process.env[gatewayKeyName], proxyHandle.token]
+  child = spawn('opencode', args, { cwd: effective.workspace_path, env, stdio: ['pipe', 'pipe', 'pipe'] })
+  child.stdin.end(await readFile(effective.prompt_file))
+  let nativeSessionId: string | undefined
+  const textParts: string[] = []
+  let stdoutBuffer = ''
+  child.stdout.on('data', chunk => {
+    const data = String(chunk)
+    void appendFile(join(aDir, 'opencode.jsonl'), redact(data, secrets))
+    stdoutBuffer += data
+    const lines = stdoutBuffer.split('\n')
+    stdoutBuffer = lines.pop() ?? ''
+    for (const line of lines) {
+      if (!line.trim()) continue
+      try {
+        const event = JSON.parse(line) as { type?: string; sessionID?: string; part?: { type?: string; text?: string; sessionID?: string } }
+        if (event.sessionID && !nativeSessionId) {
+          nativeSessionId = event.sessionID
+          const captured = event.sessionID
+          void updateSession(session => { session.attempts.find(x => x.attempt_id === attemptId)!.native_session_id = captured })
+        }
+        if (event.part?.type === 'text' && typeof event.part.text === 'string') textParts.push(event.part.text)
+      } catch { /* retain raw log */ }
+    }
+  })
+  child.stderr.on('data', chunk => { void appendFile(join(aDir, 'opencode.stderr.log'), redact(String(chunk), secrets)) })
+  const exit = await new Promise<number>((resolve, reject) => child!.once('error', reject).once('exit', code => resolve(code ?? 1)))
+  child = undefined
+  if (exit !== 0) throw new Error(`OpenCode exited ${exit}; inspect ${join(aDir, 'opencode.stderr.log')}`)
+  const text = textParts.join('').trim()
+  if (!text) throw new Error('OpenCode produced an empty result')
+  return { text, nativeSessionId }
+}
+
 async function runDeepSeek(_request: TaskRequest, effective: AttemptRequest, home: string, proxyHandle: ProxyHandle, gatewayKeyName: string): Promise<{ text: string; nativeSessionId?: string }> {
   const dshHome = join(home, 'dsh')
   await mkdir(dshHome, { recursive: true })
@@ -141,7 +219,11 @@ async function run(): Promise<void> {
       result = { text: `Fake result for ${request.objective}\n\nAcceptance criteria: ${request.acceptance_criteria.join('; ')}` }
     } else {
       proxy = await startProxy({ policy, alias: effective.model, taskId: request.task_id!, attemptId, logPath: join(aDir, 'routes.jsonl'), onRoute: route => appendEvent(dir, 'provider.route', { attempt_id: attemptId, requested: effective.model, ...route }) })
-      result = effective.harness === 'codex' ? await runCodex(request, effective, home, proxy, policy.providers.litellm.api_key_env) : await runDeepSeek(request, effective, home, proxy, policy.providers.litellm.api_key_env)
+      result = effective.harness === 'codex'
+        ? await runCodex(request, effective, home, proxy, policy.providers.litellm.api_key_env)
+        : effective.harness === 'opencode'
+          ? await runOpenCode(request, effective, home, proxy, policy.providers.litellm.api_key_env)
+          : await runDeepSeek(request, effective, home, proxy, policy.providers.litellm.api_key_env)
       if (!proxy.routes.length) throw new Error('no resolved LiteLLM route evidence')
     }
     if (cancelled) return

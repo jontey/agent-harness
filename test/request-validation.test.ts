@@ -143,6 +143,12 @@ test('rejects unsupported harness', () => {
   assert.throws(() => validateRequest(request), /harness/)
 })
 
+test('accepts the opencode harness as a peer to codex and deepseek', () => {
+  const request = explorerFixture()
+  request.harness = 'opencode'
+  assert.doesNotThrow(() => validateRequest(request))
+})
+
 test('rejects empty or non-string objective', () => {
   const request = mutate(explorerFixture())
   request.objective = ''

@@ -54,7 +54,7 @@ models:
 
 roles:
   code-explorer:
-    allowed_harnesses: [codex, deepseek]
+    allowed_harnesses: [codex, deepseek, opencode]
     allowed_models: [north-mini-code, laguna-s-2-1, nemotron-lightning, lfm-2-5-2-6b, glm-flash]
     default_model: north-mini-code
     filesystem: read-only
@@ -63,7 +63,7 @@ roles:
     workspace_strategy: read-only-checkout
 
   task-planner:
-    allowed_harnesses: [codex, deepseek]
+    allowed_harnesses: [codex, deepseek, opencode]
     allowed_models: [minimax-m3, north-mini-code, glm-flash, kimi-code]
     default_model: minimax-m3
     filesystem: read-only
@@ -72,7 +72,7 @@ roles:
     workspace_strategy: read-only-checkout
 
   code-implementer:
-    allowed_harnesses: [codex, deepseek]
+    allowed_harnesses: [codex, deepseek, opencode]
     allowed_models: [minimax-m3, north-mini-code, glm-flash, kimi-code]
     default_model: minimax-m3
     filesystem: workspace-write

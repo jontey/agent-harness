@@ -330,8 +330,8 @@ export async function output(taskId: string, attemptId?: string, source: OutputS
   const attempt = session.attempts.find(x => x.attempt_id === (attemptId ?? session.current_attempt_id))
   if (!attempt) throw new Error('attempt not found')
   const files: Record<OutputSource, string> = {
-    harness: attempt.harness === 'codex' ? 'codex.jsonl' : attempt.harness === 'deepseek' ? 'deepseek.jsonl' : 'result.md',
-    stderr: attempt.harness === 'codex' ? 'codex.stderr.log' : 'supervisor.log',
+    harness: attempt.harness === 'codex' ? 'codex.jsonl' : attempt.harness === 'deepseek' ? 'deepseek.jsonl' : attempt.harness === 'opencode' ? 'opencode.jsonl' : 'result.md',
+    stderr: attempt.harness === 'codex' ? 'codex.stderr.log' : attempt.harness === 'opencode' ? 'opencode.stderr.log' : 'supervisor.log',
     result: 'result.md', supervisor: 'supervisor.log', error: 'error.log', routes: 'routes.jsonl'
   }
   const path = join(attemptDir(dir, attempt.attempt_id), files[source])

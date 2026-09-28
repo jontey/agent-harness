@@ -106,34 +106,60 @@ The test used a custom `litellm` provider with the `openai-completions` protocol
 
 ## 4. OpenCode adapter
 
-The first OpenCode adapter can preserve the existing agent definitions while moving durable context to `~/workspace/lead-context`.
+The OpenCode adapter runs each worker as an external `opencode run` subprocess, similar to the Codex external-process adapter. The controller owns the LiteLLM proxy and writes an isolated `opencode.json` for each attempt that points at the per-attempt proxy URL and uses the proxy token for authentication. The worker reads the model alias from the attempt request and passes `--model provider/alias`; the proxy enforces ownership so an attempt cannot route to a different engine.
 
-Two execution modes are possible:
+### 4.1 Launch contract
 
-1. Existing native task agents for compatibility.
-2. External worker processes launched by the controller for consistent cross-harness behavior.
+The adapter spawns:
 
-The lead instructions should change in these ways:
+```text
+opencode run --pure --format json --model agent-harness/<alias> --dir <workspace> -
+```
 
-- allow `code-explorer-*` delegation;
-- replace the fixed `~/.config/opencode/lead-context` path with `~/workspace/lead-context` or a configured absolute path;
-- call controller operations for model and sandbox enforcement;
-- record native task IDs inside the portable session contract;
-- preserve the current artifact bundle and correction-loop behavior.
+Verified against opencode 1.18.32:
 
-Agent files can remain as role prompt sources. The controller may import and normalize them into role templates rather than duplicating their instructions.
+- `--pure` disables external plugins so the worker's behavior depends only on the isolated config the controller writes.
+- `--format json` emits one JSON event per line on stdout (`step_start`, `text`, `step_finish`, plus tool events the adapter ignores). The adapter concatenates `part.text` from each `text` event into the result. Every event carries a `sessionID` field; the worker captures the first one and persists it on the attempt record.
+- The prompt is piped on stdin so the adapter can pass arbitrary-length prompts without argv length limits.
+- `XDG_CONFIG_HOME` is redirected to a per-attempt directory. Opencode resolves `$XDG_CONFIG_HOME/opencode/opencode.json`; the adapter writes the isolated config at that exact path and uses `{env:AGENT_HARNESS_PROXY_TOKEN}` for the provider `apiKey`. The smoke test `OpenCode CLI loads an isolated provider config and emits JSON events through the per-attempt proxy token` proves both behaviours: the upstream receives `Authorization: Bearer <proxy-token>` (the env-expanded value), never the literal env-var name, and never the real gateway key.
+- `XDG_DATA_HOME` and `XDG_CACHE_HOME` are also redirected under the worker's home so the run never touches the user's global opencode state. The real gateway key is scrubbed from the worker's environment; only the proxy token is exported as `AGENT_HARNESS_PROXY_TOKEN`.
+- Two opencode-specific isolation knobs are set on the worker process: `OPENCODE_DISABLE_MODELS_FETCH=1` blocks the worker from hitting the configured `OPENCODE_MODELS_URL` at startup, and `OPENCODE_DISABLE_AUTOUPDATE=1` prevents the worker from triggering a self-upgrade mid-attempt. The `OPENCODE_DISABLE_MODELS_FETCH` behaviour was verified by the dedicated smoke test using a sentinel HTTP server: zero hits with the knob, one hit without it. Both names are present in opencode 1.18.32.
+- Opencode calls the upstream via `/v1/chat/completions` (not `/v1/responses`) when configured with `@ai-sdk/openai-compatible`. The adapter is wire-protocol agnostic, but a future enhancement may want to negotiate the protocol.
+
+### 4.2 Session and continuation
+
+The OpenCode CLI exposes `--session <id>` and `--continue`. A live proof of resume across `--session` in this opencode version was not completed in the first release, so `continuation_supported` stays `false` for OpenCode attempts. The adapter still captures the `sessionID` from every JSON event and persists it on the attempt record for future resume, but a correction or handoff always starts a fresh attempt and replays the latest checkpoint plus any pending steering message. The OpenCode external-process column in the capability matrix reflects this conservative default.
+
+### 4.3 Output and cancellation
+
+The adapter writes:
+
+- `opencode.jsonl` — every JSON line from stdout, with bearer tokens and the real gateway key redacted.
+- `opencode.stderr.log` — the raw stderr stream, also redacted.
+
+The `output` controller command maps `opencode` to those file names so a lead can inspect the raw adapter log with `agent-harness output --source harness` and `--source stderr`.
+
+A `SIGTERM` to the supervisor reaches the OpenCode child through the existing `child?.kill('SIGTERM')` path in `worker.ts`. Cancellation then proceeds through the controller's grace window. If the `opencode` binary is missing from `PATH`, the worker observes a spawn error event, the attempt terminates, and the supervisor does not hang (covered by the `missing opencode CLI rejects without hanging the worker` smoke test). The redactor scrubs bearer tokens from the JSON event stream and stderr so neither leaks into the durable adapter log; the e2e controller-driven smoke test asserts this for every attempt.
+
+### 4.4 Lead instructions and migration
+
+The first release keeps the existing native lead instructions and does not migrate bundles from `~/.config/opencode/lead-context`. The external-process adapter is launched only when a lead delegates through the controller with `harness: opencode` and an approved role/model pair, so any future lead rewrite can target the same controller operations the Codex and DSH leads already use.
+
+### 4.5 Live policy enablement
+
+The example policy in `config/policy.example.yaml` lists `opencode` in `allowed_harnesses` for the first-release roles so a fresh install can delegate to OpenCode without further edits. The live policy at `~/.config/agent-harness/policy.yaml` is not modified by the harness; operators must add `opencode` to the role allowlists themselves when they want to enable it, matching the same opt-in model used for Codex and DSH.
 
 ## 5. Capability matrix
 
-| Capability | Codex external process | Codex native child | DSH in-process | DSH SDK process | OpenCode native task |
-|---|---:|---:|---:|---:|---:|
-| Select worker model | Yes | Catalog/fixed-role limits | Yes | Yes | Via role variants |
-| Role-specific model set | Controller | No | Controller | Controller | Variants |
-| Separate LiteLLM key | Yes | No | Usually shared | Yes | Depends on process setup |
-| Separate sandbox | Yes | No within one tree | Inherits parent override | Yes | Agent/tool policy; verify OS boundary |
-| Native continuation | Yes | Yes | Yes | No one-shot continuation | Yes |
-| Durable steering | Controller | Native plus controller | Native plus controller | New run from checkpoint | Native plus controller |
-| Cross-harness handoff | Checkpoint | Checkpoint | Checkpoint | Checkpoint | Checkpoint |
+| Capability | Codex external process | Codex native child | DSH in-process | DSH SDK process | OpenCode external process | OpenCode native task |
+|---|---:|---:|---:|---:|---:|---:|
+| Select worker model | Yes | Catalog/fixed-role limits | Yes | Yes | Yes | Via role variants |
+| Role-specific model set | Controller | No | Controller | Controller | Controller | Variants |
+| Separate LiteLLM key | Yes | No | Usually shared | Yes | Yes | Depends on process setup |
+| Separate sandbox | Yes | No within one tree | Inherits parent override | Yes | Yes (per-attempt `XDG_*` + isolated config) | Agent/tool policy; verify OS boundary |
+| Native continuation | Yes | Yes | Yes | No one-shot continuation | Session ID captured; resume not yet proven | Yes |
+| Durable steering | Controller | Native plus controller | Native plus controller | New run from checkpoint | Controller (checkpoint correction) | Native plus controller |
+| Cross-harness handoff | Checkpoint | Checkpoint | Checkpoint | Checkpoint | Checkpoint | Checkpoint |
 
 ## 6. Adding another harness
 
